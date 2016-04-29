@@ -1,0 +1,179 @@
+---
+title: "Human Activity Recognition"
+author: "Radu Grosu"
+date: "26 April 2016"
+output: html_document
+bibliography: refs.bibtex
+---
+
+# Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now
+possible to collect a large amount of data about personal activity relatively
+inexpensively. These type of devices are part of the quantified self movement
+- a group of enthusiasts who take measurements about themselves regularly to
+improve their health, to find patterns in their behavior, or because they are
+tech geeks. One thing that people regularly do is quantify how much of a
+particular activity they do, but they rarely quantify how well they do it. In
+this project, we use data from accelerometers on the belt,
+forearm, arm, and dumbbell.  [@Velloso:2013:QAR:2459236.2459256].
+
+<img src="img/on-body-sensing-schema.png" width="150" align="right"></img>
+Six young healthy participants were asked to perform barbell lifts correctly and incorrectly in 4 different ways. Given data from accelerometers, the goal is to predict the class of action which is one of the following:
+
+
+- exactly according to the specification (A)
+- throwing elbows to the front (B)
+- lifting the dumbbell only halfway (C)
+- lowering the dumbbell only halfway (D)
+- throwing the hips to the front (E).
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+More information is available at [Groupware]( http://groupware.les.inf.puc-rio.br/har)
+(see the section on the Weight Lifting Exercise Dataset). 
+
+# Getting and cleaning the data 
+
+```{r message=FALSE}
+# loading the necessary packages
+library(caret)
+library(dplyr)
+```
+
+After downloading the csv files for the [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and  [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) set, we load the datasets into R.
+
+```{r cache=TRUE}
+na_strings = c("NA", "", "#DIV/0!")
+Tr = read.csv('data/pml-training.csv', na.strings=na_strings)
+Te = read.csv('data/pml-testing.csv', na.strings=na_strings)
+```
+
+The training dataset consists of `r nrow(Tr)` observations over `r ncol(Tr)-1` features. Only a small subset of the features turns out to be useful in predicting the `classe` outcome variable.
+
+We drop the index, the name of the user, and various timestamps which cannot predict the outcome variable (or which could not possibly generalize).
+```{r}
+Tr = subset(Tr, select=-grep('X|time|user', names(Tr)))
+Te = subset(Te, select=-grep('X|time|user', names(Te)))
+```
+
+
+The 96 derived features mentioned in [@Velloso:2013:QAR:2459236.2459256] (mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness for the Euler angles of each of the four sensors) are present as columns in the dataset but contain only missing values, hence we drop these variables as well.
+
+```{r}
+NA_percent = apply(Tr, 2, function(x) mean(is.na(x)))
+Tr[, NA_percent > .95] = list(NULL)
+Te[, NA_percent > .95] = list(NULL)
+```
+
+The last variables to remove are those with zero and near-zero variance.
+These can be identified by the *frequency ratio* (the frequency of the most prevalent value over the second most frequent value) and the *percent of unique values* (the number of unique values divided by the total number of samples).
+
+```{r message=FALSE}
+nzvars = nearZeroVar(Tr, saveMetrics=TRUE, names=TRUE)
+nzvars %>% head
+Tr[nzvars$nzv] = NULL
+Te[nzvars$nzv] = NULL
+```
+
+This leaves the following `r ncol(Tr) - 1` predictors for model building.
+```{r}
+Tr %>% names %>% subset(.!= "classe")
+```
+
+# Partitioning the data
+
+We split the training dataset using stratified sampling on the outcome variable in two parts: a larger one used for training the model and a hold-out part used for assessing model performance. Keeping a reasonable large hold out set is justified by the large amount of data at our disposal allowing sufficient power and precision in the assessment of accuracy without introducing substantial bias into the model.
+
+```{r}
+set.seed(1)
+inTrain <- createDataPartition(Tr$classe, p=0.7, list=FALSE)
+tr <- Tr[inTrain, ]
+te <- Tr[-inTrain, ]
+```
+
+# The models
+
+We use the following two high-performance machine learning algorithms suitable for the classification setting: [random forest](https://en.wikipedia.org/wiki/Random_forest) and
+[boosted logistic regression](https://en.wikipedia.org/wiki/LogitBoost).
+
+Neither of these methods are sensitive to skewness and difference of scale in the variables so no further pre-processing is necessary.
+
+Train the *Boosted Logistic regression* model:
+```{r}
+# LB = train(classe ~., method='LogitBoost', data=tr)
+# save(LB, file='LB.Rdata')
+load("LB.RData")
+print(LB)
+confusionMatrix(te$classe, predict(LB, newdata=te))
+```
+
+
+For the *random forest* model, using bootstrapped resampling and 10-fold cross-validation with 10 repeats leads to nearly indistinguishable models (the cross-validation resampling takes more than double the time to train though).
+
+The random forest using the default bootstrapping resampling:
+```{r message=FALSE}
+# RF = train(classe ~ ., method="rf", data=tr)
+# save(RF, file='RF.Rdata')
+load(file='RF.RData')
+print(RF)
+confusionMatrix(te$classe, predict(RF, newdata=te))
+```
+
+The random forest using 10-fold cross-validation with 10 repeats.
+```{r message=FALSE}
+# ctrl <- trainControl(method = "repeatedcv", number=10, repeats=10)
+# RF2 = train(classe ~ ., method="rf", data=tr, trControl=ctrl)
+# save(RF2, file='RF2.Rdata')
+load(file='RF2.RData')
+print(RF2)
+confusionMatrix(te$classe, predict(RF2, newdata=te))
+```
+
+The `mtry` parameter achieving the best accuracy is $27$, i.e. almost exactly half the number of predictors (considerably higher than the recommended $\sqrt{n_{pred}} \approx 8$).
+
+The out-of-bag estimate of the error rate is extremely low: `0.23%`
+while the test set error rate is even lower: `0.1%`.
+```{r}
+RF2$finalModel
+```
+
+In fact, there is a single misclassified point in the entire test set:
+```{r}
+predictions = predict(RF2, newdata=te)
+misclass = which(te$classe != predictions)
+paste("Activity", te[misclass, "classe"], "misclassified as", predictions[misclass])
+```
+
+# Model Comparison
+
+Since the first two models (`LB` and `RF`) share a common set of resampled data sets we can compare them based on their resampling statistics.
+
+```{r}
+resamp <- resamples(list(Logistic = LB, RandForest=RF))
+summary(resamp)
+```
+
+The performance distribution of the random forest model has both a higher mean and lower variance than that of the boosted logistic regression.
+```{r}
+model.diffs <- diff(resamp)
+summary(model.diffs)
+bwplot(resamp, metric="Accuracy")
+```
+
+The variable importance for the random forest model:
+```{r}
+plot(varImp(RF), top=10)
+```
+
+The `num_window` variable which separates measurements from different repetitions is not surprisingly crucial in successfully partitioning of the feature space. 
+
+
+# Predictions on the test set
+
+Use the cross-validated random forest model to make predictions on the 20 test set samples, since it has the best OOB and test set misclassification rate:
+```{r}
+predict(RF, newdata=Te)
+```
+
+# References
